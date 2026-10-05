@@ -1,7 +1,8 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { URL } from 'node:url';
 import {
-  addShipmentEvent, allocateOrder, cancelOrder, closeOrder, confirmOrder, createApproval, createCustomsDeclaration, createOrder, decideApproval, deliverOrder, dispatchOrder, generateInvoice, getOrder, listAudit, listOrders, listOutbox, operationSummary, publishOutbox, recordPayment, state, timeline, updateCustoms
+  addShipmentEvent, allocateOrder, cancelOrder, closeOrder, confirmOrder, createApproval, createCustomsDeclaration, createOrder, decideApproval, deliverOrder, dispatchOrder, generateInvoice, getOrder, IdempotencyConflict, listAudit, listIdempotency, listOrders, listOutbox, operationSummary, publishOutbox, recordPayment, state, timeline, updateCustoms,
+  type IdempotencyOptions
 } from './domain.js';
 
 const port = Number(process.env.PORT ?? 4120);
@@ -9,6 +10,7 @@ const json = (res: ServerResponse, status: number, body: unknown) => { res.statu
 const readBody = async (req: IncomingMessage) => { let raw = ''; for await (const chunk of req) raw += chunk; if (!raw.trim()) return {}; try { return JSON.parse(raw); } catch { throw new Error('请求体必须是合法 JSON'); } };
 const tenantId = (req: IncomingMessage) => String(req.headers['x-tenant-id'] ?? 'tenant-acme');
 const actor = (req: IncomingMessage) => String(req.headers['x-actor'] ?? 'api-user');
+const idem = (req: IncomingMessage): IdempotencyOptions => { const header = req.headers['idempotency-key'] ?? req.headers['x-idempotency-key']; return { key: Array.isArray(header) ? header[0] : header }; };
 const success = (res: ServerResponse, body: unknown, status = 200) => json(res, status, { data: body });
 const failure = (res: ServerResponse, error: unknown, status = 400) => json(res, status, { error: error instanceof Error ? error.message : '请求失败' });
 
@@ -23,32 +25,33 @@ const server = createServer(async (req, res) => {
     const orderId = path.match(/^\/api\/orders\/([^/]+)$/)?.[1];
     if (method === 'GET' && orderId) return success(res, getOrder(tenant, orderId));
     if (method === 'GET' && orderId && path.endsWith('/timeline')) return success(res, timeline(tenant, orderId));
-    if (method === 'POST' && path === '/api/orders') return success(res, createOrder(tenant, await readBody(req), user), 201);
-    if (method === 'POST' && orderId && path.endsWith('/confirm')) return success(res, confirmOrder(tenant, orderId, user));
-    if (method === 'POST' && orderId && path.endsWith('/allocate')) return success(res, allocateOrder(tenant, orderId, user));
-    if (method === 'POST' && orderId && path.endsWith('/dispatch')) return success(res, dispatchOrder(tenant, orderId, user));
-    if (method === 'POST' && orderId && path.endsWith('/deliver')) return success(res, deliverOrder(tenant, orderId, user));
-    if (method === 'POST' && orderId && path.endsWith('/close')) return success(res, closeOrder(tenant, orderId, user));
-    if (method === 'POST' && orderId && path.endsWith('/cancel')) return success(res, cancelOrder(tenant, orderId, user));
+    if (method === 'POST' && path === '/api/orders') return success(res, createOrder(tenant, await readBody(req), user, idem(req)), 201);
+    if (method === 'POST' && orderId && path.endsWith('/confirm')) return success(res, confirmOrder(tenant, orderId, user, idem(req)));
+    if (method === 'POST' && orderId && path.endsWith('/allocate')) return success(res, allocateOrder(tenant, orderId, user, idem(req)));
+    if (method === 'POST' && orderId && path.endsWith('/dispatch')) return success(res, dispatchOrder(tenant, orderId, user, idem(req)));
+    if (method === 'POST' && orderId && path.endsWith('/deliver')) return success(res, deliverOrder(tenant, orderId, user, idem(req)));
+    if (method === 'POST' && orderId && path.endsWith('/close')) return success(res, closeOrder(tenant, orderId, user, idem(req)));
+    if (method === 'POST' && orderId && path.endsWith('/cancel')) return success(res, cancelOrder(tenant, orderId, user, idem(req)));
 
-    if (method === 'POST' && path === '/api/customs/declarations') return success(res, createCustomsDeclaration(tenant, await readBody(req), user), 201);
+    if (method === 'POST' && path === '/api/customs/declarations') return success(res, createCustomsDeclaration(tenant, await readBody(req), user, idem(req)), 201);
     const customsId = path.match(/^\/api\/customs\/declarations\/([^/]+)$/)?.[1];
-    if (method === 'PATCH' && customsId) return success(res, updateCustoms(tenant, customsId, await readBody(req), user));
+    if (method === 'PATCH' && customsId) return success(res, updateCustoms(tenant, customsId, await readBody(req), user, idem(req)));
     const shipmentId = path.match(/^\/api\/shipments\/([^/]+)\/events$/)?.[1];
-    if (method === 'POST' && shipmentId) return success(res, addShipmentEvent(tenant, shipmentId, await readBody(req), user), 201);
+    if (method === 'POST' && shipmentId) return success(res, addShipmentEvent(tenant, shipmentId, await readBody(req), user, idem(req)), 201);
 
-    if (method === 'POST' && path === '/api/invoices') { const body = await readBody(req); return success(res, generateInvoice(tenant, String(body.orderId), user), 201); }
-    if (method === 'POST' && path === '/api/payments') return success(res, recordPayment(tenant, await readBody(req), user), 201);
-    if (method === 'POST' && path === '/api/approvals') return success(res, createApproval(tenant, await readBody(req), user), 201);
+    if (method === 'POST' && path === '/api/invoices') { const body = await readBody(req); return success(res, generateInvoice(tenant, String(body.orderId), user, idem(req)), 201); }
+    if (method === 'POST' && path === '/api/payments') return success(res, recordPayment(tenant, await readBody(req), user, idem(req)), 201);
+    if (method === 'POST' && path === '/api/approvals') return success(res, createApproval(tenant, await readBody(req), user, idem(req)), 201);
     const approvalId = path.match(/^\/api\/approvals\/([^/]+)\/decision$/)?.[1];
-    if (method === 'POST' && approvalId) return success(res, decideApproval(tenant, approvalId, await readBody(req), user));
+    if (method === 'POST' && approvalId) return success(res, decideApproval(tenant, approvalId, await readBody(req), user, idem(req)));
     if (method === 'GET' && path === '/api/audit/events') return success(res, listAudit(tenant, Number(url.searchParams.get('limit') ?? 100)));
+    if (method === 'GET' && path === '/api/idempotency') return success(res, listIdempotency(tenant));
     if (method === 'GET' && path === '/api/outbox') return success(res, listOutbox(tenant, (url.searchParams.get('status') as 'pending' | 'published' | null) ?? undefined));
     const eventId = path.match(/^\/api\/outbox\/([^/]+)\/publish$/)?.[1];
-    if (method === 'POST' && eventId) return success(res, publishOutbox(tenant, eventId, user));
-    if (method === 'GET' && path === '/api/meta') return success(res, { tenant: state.tenants.find(item => item.id === tenant), capabilities: ['orders', 'inventory-reservation', 'shipment-tracking', 'customs-compliance', 'billing', 'approvals', 'audit', 'outbox'] });
+    if (method === 'POST' && eventId) return success(res, publishOutbox(tenant, eventId, user, idem(req)));
+    if (method === 'GET' && path === '/api/meta') return success(res, { tenant: state.tenants.find(item => item.id === tenant), capabilities: ['orders', 'inventory-reservation', 'shipment-tracking', 'customs-compliance', 'billing', 'approvals', 'audit', 'outbox', 'idempotency'] });
     return failure(res, new Error('路由不存在'), 404);
-  } catch (error) { return failure(res, error); }
+  } catch (error) { return failure(res, error, error instanceof IdempotencyConflict ? 409 : 400); }
 });
 
 server.listen(port, () => console.log(`cross-border trade orchestrator listening on http://localhost:${port}`));

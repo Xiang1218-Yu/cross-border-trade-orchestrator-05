@@ -29,3 +29,22 @@ npm run dev
 ```bash
 curl -H 'x-tenant-id: tenant-acme' http://localhost:4120/api/operations/summary
 ```
+
+## 幂等请求
+
+所有写接口（创建订单、确认/分配/出运/签收/关闭/取消、创建与更新海关申报、运输轨迹、开票、收款、创建与决策审批、发布 outbox 事件）都接受 `Idempotency-Key` 请求头（也兼容 `X-Idempotency-Key`），领域服务函数同样接受 `{ key }` 选项。
+
+```bash
+curl -X POST -H 'x-tenant-id: tenant-acme' -H 'Idempotency-Key: fin-2026-10-05-001' \
+  -d '{"invoiceId":"INV-...","amount":500,"method":"bank_transfer","reference":"BANK-001"}' \
+  http://localhost:4120/api/payments
+```
+
+语义约定：
+
+- **同租户 + 同键 + 同请求体**：重放首个请求保存的业务结果，审计、库存、信用额度、收款和 outbox 不会再次产生任何可观察变化。
+- **同键 + 不同请求体**：拒绝并返回 `409`（指纹为操作名 + 规范化请求体的 SHA-256，键名、字段顺序无关）。
+- **处理中**：键在执行前被同步占位为 `in_flight`，并发重复请求要么拿到已完成结果，要么收到 `409` 处理中冲突。
+- **异常半完成**：失败请求标记为 `failed`，允许用完全相同的请求体重试；重试会复用已产生的中间产物（如授信不足时已创建的待审批单），不会重复创建。
+- **重启边界**：幂等记录保存在内存中，进程重启后失效；订单 reference 唯一、收款 reference 唯一、按订单开票/按订单建申报等既有规则作为重启后的兜底去重。生产部署应把 `state.idempotency` 替换为持久化存储。
+- 通过 `GET /api/idempotency` 可查看本租户的键、操作、指纹与状态（`in_flight` / `completed` / `failed`），结果快照不外泄。
